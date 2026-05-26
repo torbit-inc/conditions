@@ -116,9 +116,23 @@ export class ConditionEvaluatorService {
   }
 
   /**
+   * Operators whose semantics are inherently numeric — if no explicit
+   * `fieldType` hint is supplied, the evaluator defaults to `'number'`
+   * so `"30" > "5"` yields `true` instead of falling into JavaScript's
+   * lexicographic string comparison (which would return `false`).
+   *
+   * Strings that don't parse as numbers coerce to `NaN`; every comparison
+   * against `NaN` is `false`, so non-numeric data silently fails to match
+   * — the documented contract.
+   */
+  private static readonly NUMERIC_OPERATORS: ReadonlySet<ComparisonOperator> =
+    new Set(['gt', 'lt', 'gte', 'lte', 'between']);
+
+  /**
    * Applies a comparison operator. When `declaredType` is set, both the field
    * value and (where relevant) the expected value are coerced before
-   * comparison.
+   * comparison. Numeric-only operators (gt/lt/gte/lte/between) default to
+   * `'number'` coercion when no type hint is provided.
    */
   private applyOperator(
     rawValue: unknown,
@@ -138,13 +152,19 @@ export class ConditionEvaluatorService {
         return rawValue !== null;
     }
 
-    const fieldValue = this.coerce(rawValue, declaredType);
+    const effectiveType: FieldType | undefined =
+      declaredType ??
+      (ConditionEvaluatorService.NUMERIC_OPERATORS.has(operator)
+        ? 'number'
+        : undefined);
+
+    const fieldValue = this.coerce(rawValue, effectiveType);
     const expected =
       operator === 'in' ||
       operator === 'notIn' ||
       operator === 'between'
         ? rawExpected
-        : this.coerce(rawExpected, declaredType);
+        : this.coerce(rawExpected, effectiveType);
 
     switch (operator) {
       case 'eq':
@@ -191,8 +211,8 @@ export class ConditionEvaluatorService {
         if (!Array.isArray(rawExpected) || rawExpected.length !== 2) {
           return false;
         }
-        const min = this.coerce(rawExpected[0], declaredType);
-        const max = this.coerce(rawExpected[1], declaredType);
+        const min = this.coerce(rawExpected[0], effectiveType);
+        const max = this.coerce(rawExpected[1], effectiveType);
         return (
           (fieldValue as number) >= (min as number) &&
           (fieldValue as number) <= (max as number)

@@ -218,6 +218,64 @@ describe('ConditionEvaluatorService', () => {
     });
   });
 
+  /* === Numeric-operator-implies-number === */
+
+  describe('numeric operators imply Number coercion (no fieldType hint)', () => {
+    it('gt: compares strings as numbers — "30" > "5" is true', () => {
+      const ctx = { score: '30' };
+      const c: Condition = { field: 'score', operator: 'gt', value: '5' };
+      expect(service.evaluate(c, ctx)).toBe(true);
+    });
+
+    it('gt: non-numeric string coerces to NaN — never matches', () => {
+      const ctx = { score: 'abc' };
+      const c: Condition = { field: 'score', operator: 'gt', value: '5' };
+      expect(service.evaluate(c, ctx)).toBe(false);
+    });
+
+    it('lt: string < string treats both as numbers', () => {
+      const ctx = { score: '5' };
+      const c: Condition = { field: 'score', operator: 'lt', value: '30' };
+      expect(service.evaluate(c, ctx)).toBe(true);
+    });
+
+    it('between: string bounds get parsed too', () => {
+      const ctx = { score: '15' };
+      const c: Condition = {
+        field: 'score',
+        operator: 'between',
+        value: ['10', '20'],
+      };
+      expect(service.evaluate(c, ctx)).toBe(true);
+    });
+
+    it('between: returns false when field is non-numeric', () => {
+      const ctx = { score: 'not-a-number' };
+      const c: Condition = {
+        field: 'score',
+        operator: 'between',
+        value: ['10', '20'],
+      };
+      expect(service.evaluate(c, ctx)).toBe(false);
+    });
+
+    it('explicit string fieldType still wins over the numeric-operator default', () => {
+      /* If the caller really wants lexicographic gt, they say so. */
+      const ctx = { code: 'B' };
+      const c: Condition = { field: 'code', operator: 'gt', value: 'A' };
+      expect(
+        service.evaluate(c, ctx, { fieldTypes: { code: 'string' } }),
+      ).toBe(true);
+    });
+
+    it('eq: NOT a numeric operator — preserves strict equality', () => {
+      const ctx = { score: '30' };
+      const c: Condition = { field: 'score', operator: 'eq', value: 30 };
+      /* String "30" !== number 30 under strict eq */
+      expect(service.evaluate(c, ctx)).toBe(false);
+    });
+  });
+
   /* === New operators === */
 
   describe('isNull / isNotNull', () => {

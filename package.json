@@ -1,0 +1,52 @@
+{
+  "name": "@torbit-inc/conditions",
+  "version": "1.0.0",
+  "description": "Structured condition-tree DSL and JS evaluator shared across Torbit services (segments, policies, eligibility rules, visibility constraints).",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "test": "jest"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "testMatch": ["<rootDir>/src/**/*.spec.ts"]
+  },
+  "keywords": [
+    "torbit",
+    "conditions",
+    "rules",
+    "predicate",
+    "filter",
+    "segments",
+    "nestjs"
+  ],
+  "author": "Torbit Inc.",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/torbit-inc/conditions.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "peerDependencies": {
+    "@nestjs/common": "^11.0.0"
+  },
+  "devDependencies": {
+    "@nestjs/common": "11.0.1",
+    "@types/jest": "30.0.0",
+    "@types/node": "22.10.7",
+    "jest": "30.0.0",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.1",
+    "ts-jest": "29.2.5",
+    "typescript": "5.7.3"
+  }
+}

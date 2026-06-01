@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Condition } from '../types/condition.type';
 import { ComparisonOperator } from '../types/comparison-operator.type';
 import { FieldType } from '../types/field-type.type';
+import { coerceValue, resolveEffectiveType } from './value-coercion';
 
 /**
  * Optional evaluation hints. When `fieldTypes` is supplied, the evaluator
@@ -73,60 +74,12 @@ export class ConditionEvaluatorService {
   }
 
   /**
-   * Coerces a value to the declared field type. Returns the original value
-   * when no type is declared or when coercion would lose information (the
-   * comparison itself will handle the fallout via NaN or strict-equality).
+   * Coerces a value to the declared field type. Delegates to the shared
+   * `coerceValue` so the evaluator and the SQL compiler never drift.
    */
   private coerce(value: unknown, type: FieldType | undefined): unknown {
-    if (type === undefined || value === undefined || value === null) {
-      return value;
-    }
-    if (type === 'number') {
-      if (typeof value === 'number') return value;
-      if (typeof value === 'string') {
-        const trimmed = value.trim();
-        if (trimmed === '') return NaN;
-        const parsed = Number(trimmed);
-        return Number.isNaN(parsed) ? NaN : parsed;
-      }
-      if (typeof value === 'boolean') return value ? 1 : 0;
-      return NaN;
-    }
-    if (type === 'boolean') {
-      if (typeof value === 'boolean') return value;
-      if (typeof value === 'string') {
-        const lower = value.trim().toLowerCase();
-        if (lower === 'true') return true;
-        if (lower === 'false') return false;
-      }
-      return Boolean(value);
-    }
-    if (type === 'date') {
-      if (value instanceof Date) return value.getTime();
-      if (typeof value === 'number') return value;
-      if (typeof value === 'string') {
-        const parsed = Date.parse(value);
-        return Number.isNaN(parsed) ? NaN : parsed;
-      }
-      return NaN;
-    }
-    /** string */
-    if (typeof value === 'string') return value;
-    return String(value);
+    return coerceValue(value, type);
   }
-
-  /**
-   * Operators whose semantics are inherently numeric — if no explicit
-   * `fieldType` hint is supplied, the evaluator defaults to `'number'`
-   * so `"30" > "5"` yields `true` instead of falling into JavaScript's
-   * lexicographic string comparison (which would return `false`).
-   *
-   * Strings that don't parse as numbers coerce to `NaN`; every comparison
-   * against `NaN` is `false`, so non-numeric data silently fails to match
-   * — the documented contract.
-   */
-  private static readonly NUMERIC_OPERATORS: ReadonlySet<ComparisonOperator> =
-    new Set(['gt', 'lt', 'gte', 'lte', 'between']);
 
   /**
    * Applies a comparison operator. When `declaredType` is set, both the field
@@ -152,11 +105,10 @@ export class ConditionEvaluatorService {
         return rawValue !== null;
     }
 
-    const effectiveType: FieldType | undefined =
-      declaredType ??
-      (ConditionEvaluatorService.NUMERIC_OPERATORS.has(operator)
-        ? 'number'
-        : undefined);
+    const effectiveType: FieldType | undefined = resolveEffectiveType(
+      declaredType,
+      operator,
+    );
 
     const fieldValue = this.coerce(rawValue, effectiveType);
     const expected =

@@ -15,7 +15,24 @@ import { coerceValue, resolveEffectiveType } from './value-coercion';
  */
 export interface EvaluateOptions {
   readonly fieldTypes?: Record<string, FieldType>;
+  /**
+   * IANA time zone used to bucket `date`-typed comparisons to calendar days,
+   * mirroring `ConditionSqlCompilerService` so preview (SQL) and apply (JS) agree
+   * on which day an instant belongs to. Defaults to `'UTC'` when omitted.
+   */
+  readonly timeZone?: string;
 }
+
+/** Comparison operators whose `date` semantics are calendar-day-granular. */
+const DATE_RANGE_OPERATORS: ReadonlySet<ComparisonOperator> = new Set([
+  'eq',
+  'neq',
+  'gt',
+  'lt',
+  'gte',
+  'lte',
+  'between',
+]);
 
 /**
  * Evaluates Condition trees against a context object.
@@ -49,6 +66,7 @@ export class ConditionEvaluatorService {
       condition.operator,
       condition.value,
       declaredType,
+      options.timeZone ?? 'UTC',
     );
   }
 
@@ -92,6 +110,7 @@ export class ConditionEvaluatorService {
     operator: ComparisonOperator,
     rawExpected: unknown,
     declaredType: FieldType | undefined,
+    timeZone: string,
   ): boolean {
     /** Presence operators short-circuit before coercion */
     switch (operator) {
@@ -109,6 +128,12 @@ export class ConditionEvaluatorService {
       declaredType,
       operator,
     );
+
+    /* A `date` field names a calendar day, not an instant — compare at day
+       granularity in `timeZone` so JS apply agrees with the SQL compiler. */
+    if (effectiveType === 'date' && DATE_RANGE_OPERATORS.has(operator)) {
+      return this.applyDateOperator(rawValue, operator, rawExpected, timeZone);
+    }
 
     const fieldValue = this.coerce(rawValue, effectiveType);
     const expected =
@@ -173,5 +198,87 @@ export class ConditionEvaluatorService {
       default:
         throw new Error(`Unsupported operator: "${String(operator)}"`);
     }
+  }
+
+  /**
+   * Compares a `date` field to the expected value at CALENDAR-DAY granularity,
+   * mirroring `ConditionSqlCompilerService.renderDateComparison`: the field
+   * instant is bucketed to its day in `timeZone`, the expected value is read as a
+   * bare calendar day. A field/value that is not a recognisable date matches
+   * nothing (mirrors SQL NULL / NaN).
+   */
+  private applyDateOperator(
+    rawValue: unknown,
+    operator: ComparisonOperator,
+    rawExpected: unknown,
+    timeZone: string,
+  ): boolean {
+    const fieldEpoch = coerceValue(rawValue, 'date');
+    if (typeof fieldEpoch !== 'number' || Number.isNaN(fieldEpoch)) {
+      return false;
+    }
+    const fieldDay = this.tzDayNumber(fieldEpoch, timeZone);
+
+    if (operator === 'between') {
+      if (!Array.isArray(rawExpected) || rawExpected.length !== 2) return false;
+      const lo = this.calendarDayNumber(rawExpected[0]);
+      const hi = this.calendarDayNumber(rawExpected[1]);
+      if (lo === null || hi === null) return false;
+      return fieldDay >= lo && fieldDay <= hi;
+    }
+
+    const valueDay = this.calendarDayNumber(rawExpected);
+    if (valueDay === null) return false;
+
+    switch (operator) {
+      case 'eq':
+        return fieldDay === valueDay;
+      case 'neq':
+        return fieldDay !== valueDay;
+      case 'gt':
+        return fieldDay > valueDay;
+      case 'lt':
+        return fieldDay < valueDay;
+      case 'gte':
+        return fieldDay >= valueDay;
+      case 'lte':
+        return fieldDay <= valueDay;
+      default:
+        return false;
+    }
+  }
+
+  /** Integer day index (days since epoch) of `epochMs` in the given time zone. */
+  private tzDayNumber(epochMs: number, timeZone: string): number {
+    /* en-CA renders `YYYY-MM-DD`; the tz option shifts the wall-clock date. */
+    const [year, month, day] = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    })
+      .format(new Date(epochMs))
+      .split('-')
+      .map(Number);
+    return Date.UTC(year, month - 1, day) / 86_400_000;
+  }
+
+  /** Integer day index of a bare calendar date (`YYYY-MM-DD`/Date/epoch), or null. */
+  private calendarDayNumber(value: unknown): number | null {
+    if (typeof value === 'string') {
+      const match = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (!match) return null;
+      return (
+        Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) /
+        86_400_000
+      );
+    }
+    if (value instanceof Date) {
+      return Math.floor(value.getTime() / 86_400_000);
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Math.floor(value / 86_400_000);
+    }
+    return null;
   }
 }

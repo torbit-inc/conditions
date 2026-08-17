@@ -218,6 +218,48 @@ describe('ConditionEvaluatorService', () => {
     });
   });
 
+  describe('date fields are compared at calendar-day granularity (SQL parity)', () => {
+    const dateOpts = (timeZone?: string) => ({
+      fieldTypes: { createdAt: 'date' as const },
+      ...(timeZone ? { timeZone } : {}),
+    });
+
+    it('lte includes an instant later the SAME day (fixes the off-by-one)', () => {
+      const ctx = { createdAt: '2026-08-14T17:00:00Z' };
+      const c: Condition = { field: 'createdAt', operator: 'lte', value: '2026-08-14' };
+      expect(service.evaluate(c, ctx, dateOpts())).toBe(true);
+    });
+
+    it('lte excludes the next day', () => {
+      const ctx = { createdAt: '2026-08-15T00:00:00Z' };
+      const c: Condition = { field: 'createdAt', operator: 'lte', value: '2026-08-14' };
+      expect(service.evaluate(c, ctx, dateOpts())).toBe(false);
+    });
+
+    it('gt excludes an instant later the same day', () => {
+      const ctx = { createdAt: '2026-08-14T17:00:00Z' };
+      const c: Condition = { field: 'createdAt', operator: 'gt', value: '2026-08-14' };
+      expect(service.evaluate(c, ctx, dateOpts())).toBe(false);
+    });
+
+    it('eq matches any instant on the day', () => {
+      const ctx = { createdAt: '2026-08-14T23:59:00Z' };
+      const c: Condition = { field: 'createdAt', operator: 'eq', value: '2026-08-14' };
+      expect(service.evaluate(c, ctx, dateOpts())).toBe(true);
+    });
+
+    it('buckets the field in the tenant time zone, not UTC', () => {
+      // 2026-08-15T01:00Z is 2026-08-14 22:00 in Buenos Aires (UTC-3).
+      const ctx = { createdAt: '2026-08-15T01:00:00Z' };
+      const c: Condition = { field: 'createdAt', operator: 'lte', value: '2026-08-14' };
+      expect(
+        service.evaluate(c, ctx, dateOpts('America/Argentina/Buenos_Aires')),
+      ).toBe(true);
+      // Same instant in UTC lands on 2026-08-15 → excluded.
+      expect(service.evaluate(c, ctx, dateOpts())).toBe(false);
+    });
+  });
+
   /* === Numeric-operator-implies-number === */
 
   describe('numeric operators imply Number coercion (no fieldType hint)', () => {

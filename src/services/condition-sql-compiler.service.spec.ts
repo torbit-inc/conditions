@@ -27,13 +27,18 @@ describe('ConditionSqlCompilerService', () => {
         kind: 'column',
         type: 'number',
       },
+      createdAt: { sql: 'd."createdAt"', kind: 'column', type: 'date' },
     };
     if (columns[path]) return columns[path];
     if (path.startsWith('industryData.')) {
       const key = path.slice('industryData.'.length);
-      /* cuotasEnMora is a numeric count; everything else defaults to string. */
+      /* cuotasEnMora is a numeric count; fechaAlta is a date; else string. */
       const type: FieldSqlBinding['type'] =
-        key === 'cuotasEnMora' ? 'number' : 'string';
+        key === 'cuotasEnMora'
+          ? 'number'
+          : key === 'fechaAlta'
+            ? 'date'
+            : 'string';
       return {
         sql: `(d."industryData" #>> '{${key}}')`,
         kind: 'json',
@@ -190,6 +195,117 @@ describe('ConditionSqlCompilerService', () => {
       expect(norm(sql)).toMatch(/CASE WHEN/);
       expect(norm(sql)).toMatch(/~ '\^/);
       expect(norm(sql)).toContain('AS numeric');
+    });
+  });
+
+  describe('date fields (day-granular, tenant-tz)', () => {
+    const TZ = 'America/Argentina/Buenos_Aires';
+    const compileTz = (condition: Condition) =>
+      service.compile(condition, { resolveField, timeZone: TZ });
+
+    it('lte on a date column → strictly before the NEXT tenant-local day (fixes the off-by-one)', () => {
+      const { sql, parameters } = compileTz({
+        field: 'createdAt',
+        operator: 'lte',
+        value: '2026-08-14',
+      });
+      // Field kept as a raw instant (sargable), compared against next-day midnight.
+      expect(norm(sql)).toContain('CAST((d."createdAt") AS timestamptz)');
+      expect(norm(sql)).toMatch(
+        /< \(CAST\(CAST\(:c\d+ AS date\) \+ 1 AS timestamp\) AT TIME ZONE :c\d+\)/,
+      );
+      // No raw "<= midnight" and no epoch-millis form for dates anymore.
+      expect(norm(sql)).not.toContain('<=');
+      expect(norm(sql)).not.toContain('EXTRACT(EPOCH');
+      expect(Object.values(parameters)).toContain('2026-08-14');
+      expect(Object.values(parameters)).toContain(TZ);
+    });
+
+    it('gte on a date column → at-or-after the tenant-local day start (no +1)', () => {
+      const { sql } = compileTz({
+        field: 'createdAt',
+        operator: 'gte',
+        value: '2026-08-01',
+      });
+      expect(norm(sql)).toMatch(
+        />= \(CAST\(CAST\(:c\d+ AS date\) AS timestamp\) AT TIME ZONE :c\d+\)/,
+      );
+      expect(norm(sql)).not.toContain('+ 1 AS timestamp');
+    });
+
+    it('lt on a date column → strictly before the tenant-local day start', () => {
+      const { sql } = compileTz({
+        field: 'createdAt',
+        operator: 'lt',
+        value: '2026-08-14',
+      });
+      expect(norm(sql)).toMatch(
+        /< \(CAST\(CAST\(:c\d+ AS date\) AS timestamp\) AT TIME ZONE :c\d+\)/,
+      );
+      expect(norm(sql)).not.toContain('+ 1 AS timestamp');
+    });
+
+    it('gt on a date column → at-or-after the NEXT tenant-local day', () => {
+      const { sql } = compileTz({
+        field: 'createdAt',
+        operator: 'gt',
+        value: '2026-08-14',
+      });
+      expect(norm(sql)).toMatch(
+        />= \(CAST\(CAST\(:c\d+ AS date\) \+ 1 AS timestamp\) AT TIME ZONE :c\d+\)/,
+      );
+    });
+
+    it('eq on a date column → a half-open [dayStart, nextDayStart) range', () => {
+      const { sql } = compileTz({
+        field: 'createdAt',
+        operator: 'eq',
+        value: '2026-08-14',
+      });
+      expect(norm(sql)).toMatch(/>= \(CAST\(CAST\(:c\d+ AS date\) AS timestamp\)/);
+      expect(norm(sql)).toContain('AND');
+      expect(norm(sql)).toMatch(/< \(CAST\(CAST\(:c\d+ AS date\) \+ 1 AS timestamp\)/);
+    });
+
+    it('between on a date column → [loDayStart, hiNextDayStart)', () => {
+      const { sql, parameters } = compileTz({
+        field: 'createdAt',
+        operator: 'between',
+        value: ['2026-08-01', '2026-08-14'],
+      });
+      expect(norm(sql)).toMatch(/>= \(CAST\(CAST\(:c\d+ AS date\) AS timestamp\)/);
+      expect(norm(sql)).toMatch(/< \(CAST\(CAST\(:c\d+ AS date\) \+ 1 AS timestamp\)/);
+      expect(Object.values(parameters)).toEqual(
+        expect.arrayContaining(['2026-08-01', '2026-08-14', TZ]),
+      );
+    });
+
+    it('a JSONB date field guards the timestamptz cast so junk rows resolve to NULL', () => {
+      const { sql } = compileTz({
+        field: 'industryData.fechaAlta',
+        operator: 'lte',
+        value: '2026-08-14',
+      });
+      expect(norm(sql)).toMatch(/CASE WHEN .+ THEN CAST\(.+ AS timestamptz\) END/);
+      expect(norm(sql)).toContain('AT TIME ZONE');
+    });
+
+    it('defaults to UTC day boundaries when no timeZone option is supplied', () => {
+      const { parameters } = compile({
+        field: 'createdAt',
+        operator: 'lte',
+        value: '2026-08-14',
+      });
+      expect(Object.values(parameters)).toContain('UTC');
+    });
+
+    it('an ISO-timestamp value is floored to its calendar date', () => {
+      const { parameters } = compileTz({
+        field: 'createdAt',
+        operator: 'lte',
+        value: '2026-08-14T17:30:00.000Z',
+      });
+      expect(Object.values(parameters)).toContain('2026-08-14');
     });
   });
 

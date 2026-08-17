@@ -31,6 +31,15 @@ export interface FieldSqlBinding {
 export interface CompileOptions {
   /** Maps a dot-path to its SQL binding; `null` ⇒ the field is not filterable. */
   readonly resolveField: (path: string) => FieldSqlBinding | null;
+  /**
+   * IANA time zone used to bucket `date`-typed comparisons to calendar days
+   * (e.g. `'America/Argentina/Buenos_Aires'`). A `date` filter names a calendar
+   * day, not an instant, so the comparison is rendered against the tenant-local
+   * day boundaries — otherwise `lte '2026-08-14'` would compare a full timestamp
+   * against that day's 00:00 and drop everything created later that day. Defaults
+   * to `'UTC'` when omitted.
+   */
+  readonly timeZone?: string;
 }
 
 export interface CompiledCondition {
@@ -45,10 +54,23 @@ export interface CompiledCondition {
 /** Mutable accumulator threaded through the recursive walk. */
 interface CompileContext {
   readonly resolveField: (path: string) => FieldSqlBinding | null;
+  /** IANA time zone for `date`-typed day bucketing (`'UTC'` when unset). */
+  readonly timeZone: string;
   readonly parameters: Record<string, unknown>;
   readonly warnings: string[];
   next: number;
 }
+
+/** Comparison operators whose `date` semantics are calendar-day-granular. */
+const DATE_RANGE_OPERATORS: ReadonlySet<ComparisonOperator> = new Set([
+  'eq',
+  'neq',
+  'gt',
+  'lt',
+  'gte',
+  'lte',
+  'between',
+]);
 
 /** Numeric-looking text guard (mirrors `Number(trim)` acceptance closely). */
 const NUMERIC_GUARD = String.raw`^\s*-?\d+(\.\d+)?\s*$`;
@@ -76,6 +98,7 @@ export class ConditionSqlCompilerService {
   compile(condition: Condition, options: CompileOptions): CompiledCondition {
     const ctx: CompileContext = {
       resolveField: options.resolveField,
+      timeZone: options.timeZone ?? 'UTC',
       parameters: {},
       warnings: [],
       next: 0,
@@ -124,6 +147,14 @@ export class ConditionSqlCompilerService {
     }
 
     const effectiveType = resolveEffectiveType(binding.type, op);
+
+    /* A `date` field names a calendar day, not an instant. Render its ordered
+       comparisons against tenant-local day boundaries so e.g. `lte <day>` keeps
+       everything created during that day (see {@link renderDateComparison}). */
+    if (effectiveType === 'date' && DATE_RANGE_OPERATORS.has(op)) {
+      return this.renderDateComparison(binding, op, condition.value, ctx);
+    }
+
     const field = this.renderField(binding, effectiveType);
 
     switch (op) {
@@ -209,6 +240,117 @@ export class ConditionSqlCompilerService {
         /* Already text from `->>`; compare directly. */
         return `(${e})`;
     }
+  }
+
+  /**
+   * Renders a `date`-typed ordered comparison at CALENDAR-DAY granularity in the
+   * tenant time zone. The field stays a raw instant (so a column index remains
+   * usable) and is compared against day-boundary instants derived from the value:
+   *
+   *   Lo(v) = local midnight on day v        Hi(v) = local midnight on day v+1
+   *
+   * so `lte v → field < Hi(v)` includes every row created during day v (the
+   * off-by-one fix), while `gte v → field >= Lo(v)` and `lt v → field < Lo(v)`.
+   * `eq`/`between` become half-open ranges. A value that is not a calendar date
+   * matches nothing (mirrors the evaluator's NaN handling).
+   */
+  private renderDateComparison(
+    binding: FieldSqlBinding,
+    op: ComparisonOperator,
+    value: unknown,
+    ctx: CompileContext,
+  ): string {
+    const field = this.renderDateInstantField(binding);
+    /* Bind the tenant tz ONCE (as a `:cN` param so per-fragment namespacing in
+       consumers still works) and reuse it across every boundary in this leaf. */
+    const tz = this.param(ctx, ctx.timeZone);
+
+    if (op === 'between') {
+      if (!Array.isArray(value) || value.length !== 2) return 'FALSE';
+      const lo = this.dayLowerBound(value[0], tz, ctx);
+      const hi = this.dayUpperBound(value[1], tz, ctx);
+      if (lo === null || hi === null) return 'FALSE';
+      return `(${field} >= ${lo} AND ${field} < ${hi})`;
+    }
+
+    const lo = this.dayLowerBound(value, tz, ctx);
+    const hi = this.dayUpperBound(value, tz, ctx);
+    if (lo === null || hi === null) return 'FALSE';
+
+    switch (op) {
+      case 'eq':
+        return `(${field} >= ${lo} AND ${field} < ${hi})`;
+      case 'neq':
+        return `(NOT (${field} >= ${lo} AND ${field} < ${hi}))`;
+      case 'lt':
+        return `(${field} < ${lo})`;
+      case 'lte':
+        return `(${field} < ${hi})`;
+      case 'gt':
+        return `(${field} >= ${hi})`;
+      case 'gte':
+        return `(${field} >= ${lo})`;
+      default:
+        return 'FALSE';
+    }
+  }
+
+  /**
+   * The field as a raw `timestamptz` instant. A native column casts directly; a
+   * JSONB text extraction guards the cast so a non-date row resolves to NULL (no
+   * match) instead of aborting the query. Uses `CAST(...)` not `::` (TypeORM
+   * `:param` collision).
+   */
+  private renderDateInstantField(binding: FieldSqlBinding): string {
+    const e = binding.sql;
+    if (binding.kind === 'column') {
+      return `CAST((${e}) AS timestamptz)`;
+    }
+    return `(CASE WHEN (${e}) ~ '${DATE_GUARD}' THEN CAST((${e}) AS timestamptz) END)`;
+  }
+
+  /** Local-midnight instant on the value's calendar day (`null` if not a date). */
+  private dayLowerBound(
+    value: unknown,
+    tz: string,
+    ctx: CompileContext,
+  ): string | null {
+    const day = this.toDateLiteral(value);
+    if (day === null) return null;
+    const p = this.param(ctx, day);
+    return `(CAST(CAST(${p} AS date) AS timestamp) AT TIME ZONE ${tz})`;
+  }
+
+  /** Local-midnight instant on the day AFTER the value's calendar day. */
+  private dayUpperBound(
+    value: unknown,
+    tz: string,
+    ctx: CompileContext,
+  ): string | null {
+    const day = this.toDateLiteral(value);
+    if (day === null) return null;
+    const p = this.param(ctx, day);
+    return `(CAST(CAST(${p} AS date) + 1 AS timestamp) AT TIME ZONE ${tz})`;
+  }
+
+  /**
+   * Normalises a comparison value to a bare `YYYY-MM-DD` calendar date. Strings
+   * keep their leading date part (so an ISO timestamp is floored to its day);
+   * Dates/epoch-millis take their UTC calendar date. Returns `null` for anything
+   * that is not a recognisable date.
+   */
+  private toDateLiteral(value: unknown): string | null {
+    if (typeof value === 'string') {
+      const match = value.trim().match(/^(\d{4}-\d{2}-\d{2})/);
+      return match ? match[1] : null;
+    }
+    if (value instanceof Date) {
+      return value.toISOString().slice(0, 10);
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return new Date(value).toISOString().slice(0, 10);
+    }
+    return null;
   }
 
   /** Renders a numeric/date BETWEEN with two coerced bounds. */

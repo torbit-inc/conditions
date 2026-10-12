@@ -1,29 +1,8 @@
+import { COMPARISON_OPERATORS } from '../constants/comparison-operators.constant';
+
 /**
- * Supported comparison operators for field-level conditions.
- *
- * The set spans:
- *  - equality:     eq, neq
- *  - ordering:     gt, lt, gte, lte
- *  - membership:   in, notIn
- *  - presence:     exists, notExists, isNull, isNotNull
- *  - substring:    contains, notContains, startsWith, endsWith
- *  - range:        between  (value is [min, max])
+ * Supported comparison operators for field-level conditions — derived from
+ * the runtime list `COMPARISON_OPERATORS`, so the type and the list can never
+ * drift.
  */
-export type ComparisonOperator =
-  | 'eq'
-  | 'neq'
-  | 'gt'
-  | 'lt'
-  | 'gte'
-  | 'lte'
-  | 'in'
-  | 'notIn'
-  | 'exists'
-  | 'notExists'
-  | 'isNull'
-  | 'isNotNull'
-  | 'contains'
-  | 'notContains'
-  | 'startsWith'
-  | 'endsWith'
-  | 'between';
+export type ComparisonOperator = (typeof COMPARISON_OPERATORS)[number];

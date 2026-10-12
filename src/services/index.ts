@@ -14,3 +14,4 @@ export {
   resolveEffectiveType,
   NUMERIC_OPERATORS,
 } from './value-coercion';
+export { ConditionShapeValidatorService } from './condition-shape-validator.service';

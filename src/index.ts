@@ -1,4 +1,5 @@
 export * from './types';
+export * from './constants';
 export {
   ConditionEvaluatorService,
   type EvaluateOptions,
@@ -15,4 +16,5 @@ export {
   resolveEffectiveType,
   NUMERIC_OPERATORS,
 } from './services/value-coercion';
+export { ConditionShapeValidatorService } from './services/condition-shape-validator.service';
 export { ConditionsModule } from './conditions.module';

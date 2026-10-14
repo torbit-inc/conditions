@@ -40,12 +40,36 @@ evaluator.evaluate(condition, context, {
 });
 ```
 
-Without `fieldTypes`, the evaluator preserves JavaScript's default coercion behavior (backwards compatible with the original `business-rules-service` implementation).
+Without a `fieldTypes` hint:
+
+- the ordering operators (`gt` / `lt` / `gte` / `lte` / `between`) coerce both sides to **numbers** (since 1.1.0), so `"30" > "5"` is `true`. A value that is not numeric becomes `NaN` and the comparison is `false`, including ISO date strings. Declare `'date'` for date fields.
+- every other operator uses JavaScript's default semantics.
+
+## Validating untrusted trees
+
+The evaluator assumes a well-formed tree and **throws** on a malformed one: a leaf without `field`, an unknown operator, a non-array `and`, or a `null` child. Check every tree that comes from an API, a file or a database row before storing or evaluating it:
+
+```ts
+import { ConditionShapeValidatorService } from '@torbit-inc/conditions';
+
+const errors = shapeValidator.errors(body.condition);
+// [] when valid, otherwise path-qualified messages, e.g.
+// ['condition: unknown key "all" — use "and", "or", "not" or a field comparison {field, operator, value}']
+```
+
+The rules:
+
+- Each node is exactly one of `and` / `or` (an array; empty is allowed), `not` (a node), or a leaf with only `field` (a non-empty string), `operator` (one of `COMPARISON_OPERATORS`) and `value`.
+- `in` / `notIn` need an array value, and `between` needs `[min, max]`.
+- Nesting is at most `CONDITION_MAX_DEPTH` (8).
+
+`COMPARISON_OPERATORS` is the runtime list that `ComparisonOperator` is derived from.
 
 ## Usage in NestJS
 
 ```ts
 import { ConditionsModule, ConditionEvaluatorService } from '@torbit-inc/conditions';
+// ConditionsModule also provides ConditionSqlCompilerService and ConditionShapeValidatorService.
 
 @Module({ imports: [ConditionsModule] })
 export class MyModule {}
